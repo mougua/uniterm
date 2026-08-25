@@ -1638,7 +1638,11 @@ function getShellLabel(path: string): string {
   }
   if (lower.includes('pwsh')) return 'PowerShell'
   if (lower.includes('powershell')) return 'Windows PowerShell'
-  if (lower.includes('bash')) return 'Git Bash'
+  if (lower.includes('bash')) {
+    // WSL bash (System32 binary or WindowsApps alias) — not Git Bash.
+    if (lower.includes('system32') || lower.includes('windowsapps') || lower.includes('wsl')) return 'WSL Bash'
+    return 'Git Bash'
+  }
   if (lower.includes('cmd')) return 'Command Prompt'
   return path.split(/[\\/]/).pop() || path
 }

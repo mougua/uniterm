@@ -10,6 +10,7 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
+	"github.com/ys-ll/uniterm/backend/session"
 	"golang.org/x/sys/windows"
 )
 
@@ -53,7 +54,13 @@ func (a *App) GetAvailableShells() []string {
 		add(p)
 	}
 	if !hasShell("bash.exe") {
-		add("bash.exe")
+		// Only offer Git Bash when a real one exists on PATH; exec.LookPath
+		// would resolve the WSL shim (System32\bash.exe or the WindowsApps
+		// App Execution Alias stub) and get mislabeled as Git Bash. WSL is
+		// offered separately below.
+		if p, ok := session.FindGitBashInPath(); ok {
+			add(p)
+		}
 	}
 	if distros, _ := listWSLDistros(); len(distros) > 0 {
 		for _, d := range distros {

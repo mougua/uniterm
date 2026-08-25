@@ -180,7 +180,7 @@ func (s *LocalSession) Connect(config ConnectionConfig) error {
 		commandLine = buildCommandLine(shell)
 		lowerShell := strings.ToLower(shell)
 		if strings.Contains(lowerShell, "bash") {
-			if strings.Contains(lowerShell, "system32") || strings.Contains(lowerShell, "wsl") {
+			if isWSLBashPath(lowerShell) {
 				cmd = exec.Command(shell)
 				cmd.Env = os.Environ()
 			} else {
@@ -280,8 +280,9 @@ func buildCommandLine(shell string) string {
 	quoted := fmt.Sprintf(`"%s"`, shell)
 
 	if strings.Contains(lower, "bash") {
-		// WSL bash (inside System32) does not support --login -i passed this way.
-		if strings.Contains(lower, "system32") || strings.Contains(lower, "wsl") {
+		// WSL bash (System32 binary or WindowsApps alias) does not support
+		// --login -i passed this way.
+		if isWSLBashPath(lower) {
 			return quoted
 		}
 		return fmt.Sprintf(`"%s" --login -i`, shell)
@@ -290,6 +291,16 @@ func buildCommandLine(shell string) string {
 		return fmt.Sprintf(`"%s" /k`, shell)
 	}
 	return quoted
+}
+
+// isWSLBashPath reports whether a lowercased shell path points at a WSL bash
+// shim: the System32\bash.exe binary, the WindowsApps App Execution Alias
+// stub, or any path containing "wsl". Git Bash never lives in these
+// locations, so it is never misclassified.
+func isWSLBashPath(lower string) bool {
+	return strings.Contains(lower, "system32") ||
+		strings.Contains(lower, "windowsapps") ||
+		strings.Contains(lower, "wsl")
 }
 
 func shellName(path string) string {
@@ -503,6 +514,44 @@ func (s *LocalSession) runPostLoginScript(script string) {
 	s.baseSession.RunPostLoginScript(ctx, script, send, s.IsConnected)
 }
 
+// FindGitBashInPath searches PATH for a Git Bash bash.exe, skipping the
+// WSL bash shims. exec.LookPath("bash.exe") cannot be used directly: on
+// machines where Git is installed outside the standard locations and
+// WindowsApps/System32 sort before Git's bin dir in PATH, LookPath resolves
+// to a WSL shim (the System32\bash.exe binary or the WindowsApps App
+// Execution Alias stub), which then gets mislabeled and launched as
+// "Git Bash". WSL is offered separately via wsl://<distro> entries, so the
+// shims must never stand in for Git Bash here.
+func FindGitBashInPath() (string, bool) {
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" || isWSLShimDir(dir) {
+			continue
+		}
+		p := filepath.Join(dir, "bash.exe")
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+// isWSLShimDir reports whether dir can host a WSL bash shim: the Windows
+// system directories System32/SysWOW64, or WindowsApps where the App
+// Execution Alias stub bash.exe lives. It matches path segments so entries
+// with forward slashes (C:/Windows/System32) are caught too, while
+// directories whose names merely contain "windows" (e.g. a custom
+// windows-tools\Git\bin) are not skipped.
+func isWSLShimDir(dir string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(dir, "/", `\`))
+	trimmed := strings.TrimRight(normalized, `\`)
+	for _, seg := range strings.Split(trimmed, `\`) {
+		if seg == "system32" || seg == "syswow64" || seg == "windowsapps" {
+			return true
+		}
+	}
+	return false
+}
+
 func defaultShell() string {
 	if _, err := exec.LookPath("pwsh.exe"); err == nil {
 		return "pwsh.exe"
@@ -522,8 +571,9 @@ func defaultShell() string {
 			return p
 		}
 	}
-	if _, err := exec.LookPath("bash.exe"); err == nil {
-		return "bash.exe"
+	// Fall back to a PATH search that excludes the WSL shims.
+	if p, ok := FindGitBashInPath(); ok {
+		return p
 	}
 	return "cmd.exe"
 }
