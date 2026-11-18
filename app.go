@@ -2582,6 +2582,20 @@ func (a *App) chatCompletionAnthropic(apiKey, baseURL, model string, reqBody map
 
 	client := &http.Client{Timeout: 0}
 	res, err := client.Do(req)
+	// Retry once if the connection closes before we receive response headers.
+	// Keep streaming outside the retry so emitted events are never replayed.
+	if ctx.Err() == nil && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+		timer := time.NewTimer(250 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-timer.C:
+			retry := req.Clone(ctx)
+			retry.Body = io.NopCloser(bytes.NewReader(modifiedJSON))
+			res, err = client.Do(retry)
+		}
+	}
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("AI_REQUEST_TIMEOUT")
