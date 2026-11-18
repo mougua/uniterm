@@ -81,7 +81,7 @@ func (s *SMBSession) Connect(config ConnectionConfig) error {
 	return nil
 }
 
-func (s *SMBSession) Write(data []byte) error  { return nil }
+func (s *SMBSession) Write(data []byte) error     { return nil }
 func (s *SMBSession) Resize(cols, rows int) error { return nil }
 
 func (s *SMBSession) Disconnect() error {
@@ -484,7 +484,7 @@ func (s *SMBSession) Get(remotePath, localPath string, recursive bool) (string, 
 			return
 		}
 		task.Status = "done"
-		s.emitTransferComplete(task)
+		s.emitTransferComplete(task, task.Status)
 	}()
 	return task.ID, nil
 }
@@ -533,7 +533,7 @@ func (s *SMBSession) Put(localPath, remotePath string, recursive bool) (string, 
 			return
 		}
 		task.Status = "done"
-		s.emitTransferComplete(task)
+		s.emitTransferComplete(task, task.Status)
 	}()
 	return task.ID, nil
 }
@@ -558,9 +558,7 @@ func (s *SMBSession) PauseTransfer(taskID string) error {
 	if !ok {
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-	task.paused = true
-	task.Status = "paused"
-	s.emitTransferComplete(task)
+	task.setPaused(true, func() { s.emitTransferComplete(task, "paused") })
 	return nil
 }
 
@@ -571,11 +569,7 @@ func (s *SMBSession) ResumeTransfer(taskID string) error {
 	if !ok {
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-	task.paused = false
-	task.Status = "running"
-	close(task.pauseCh)
-	task.pauseCh = make(chan struct{})
-	s.emitTransferStart(task)
+	task.setPaused(false, func() { s.emitTransferStart(task) })
 	return nil
 }
 
@@ -602,9 +596,9 @@ func (s *SMBSession) calcSmbRemoteDirSize(remoteDir string) (int64, error) {
 
 func (s *SMBSession) downloadDir(remoteDir, localDir string, task *TransferTask) error {
 	// Calculate total size for progress tracking
-	if task.Total <= 0 {
+	if task.total() <= 0 {
 		if total, err := s.calcSmbRemoteDirSize(remoteDir); err == nil {
-			task.Total = total
+			task.setTotal(total)
 		}
 	}
 
@@ -638,10 +632,10 @@ func (s *SMBSession) downloadDir(remoteDir, localDir string, task *TransferTask)
 
 func (s *SMBSession) downloadFile(task *TransferTask, remotePath, localPath string) error {
 	// Get file size first for progress tracking
-	if task.Total <= 0 {
+	if task.total() <= 0 {
 		if fi, err := s.share.Stat(remotePath); err == nil {
 			if fi.Size() > 0 {
-				task.Total = fi.Size()
+				task.setTotal(fi.Size())
 			}
 		}
 	}
@@ -681,9 +675,9 @@ func (s *SMBSession) downloadFile(task *TransferTask, remotePath, localPath stri
 
 func (s *SMBSession) uploadDir(localDir, remoteDir string, task *TransferTask) error {
 	// Calculate total size for progress tracking
-	if task.Total <= 0 {
+	if task.total() <= 0 {
 		if total, err := calcLocalDirSize(localDir); err == nil {
-			task.Total = total
+			task.setTotal(total)
 		}
 	}
 
@@ -717,10 +711,10 @@ func (s *SMBSession) uploadDir(localDir, remoteDir string, task *TransferTask) e
 
 func (s *SMBSession) uploadFile(task *TransferTask, localPath, remotePath string) error {
 	// Get local file size first for progress tracking
-	if task.Total <= 0 {
+	if task.total() <= 0 {
 		if fi, err := os.Stat(localPath); err == nil {
 			if fi.Size() > 0 {
-				task.Total = fi.Size()
+				task.setTotal(fi.Size())
 			}
 		}
 	}
@@ -773,7 +767,7 @@ func (s *SMBSession) emitTransferStart(task *TransferTask) {
 		"event":  "start",
 		"tfType": task.Type,
 		"name":   name,
-		"total":  task.Total,
+		"total":  task.total(),
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	s.emitData([]byte("\x1b]633;S" + string(jsonBytes) + "\x07"))
@@ -785,18 +779,18 @@ func (s *SMBSession) emitTransferProgress(task *TransferTask) {
 		"taskId":   task.ID,
 		"event":    "progress",
 		"progress": task.Progress,
-		"total":    task.Total,
+		"total":    task.total(),
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	s.emitData([]byte("\x1b]633;S" + string(jsonBytes) + "\x07"))
 }
 
-func (s *SMBSession) emitTransferComplete(task *TransferTask) {
+func (s *SMBSession) emitTransferComplete(task *TransferTask, status string) {
 	payload := map[string]interface{}{
 		"type":   "sftp:transfer",
 		"taskId": task.ID,
 		"event":  "complete",
-		"status": task.Status,
+		"status": status,
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	s.emitData([]byte("\x1b]633;S" + string(jsonBytes) + "\x07"))

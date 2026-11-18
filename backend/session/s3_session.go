@@ -66,7 +66,7 @@ func (s *S3Session) Connect(config ConnectionConfig) error {
 	return nil
 }
 
-func (s *S3Session) Write(data []byte) error  { return nil }
+func (s *S3Session) Write(data []byte) error     { return nil }
 func (s *S3Session) Resize(cols, rows int) error { return nil }
 
 func (s *S3Session) Disconnect() error {
@@ -409,9 +409,9 @@ func (s *S3Session) Rename(oldName, newName string) error {
 		prefix += "/"
 	}
 	input := simples3.ListInput{
-		Bucket:    s.bucket,
-		Prefix:    prefix,
-		MaxKeys:   1,
+		Bucket:  s.bucket,
+		Prefix:  prefix,
+		MaxKeys: 1,
 	}
 	resp, err := s.s3.List(input)
 	if err != nil {
@@ -502,9 +502,9 @@ func (s *S3Session) Copy(oldPath, newPath string) error {
 		prefix += "/"
 	}
 	input := simples3.ListInput{
-		Bucket:    s.bucket,
-		Prefix:    prefix,
-		MaxKeys:   1,
+		Bucket:  s.bucket,
+		Prefix:  prefix,
+		MaxKeys: 1,
 	}
 	resp, err := s.s3.List(input)
 	if err != nil {
@@ -639,7 +639,7 @@ func (s *S3Session) Get(remotePath, localPath string, recursive bool) (string, e
 			return
 		}
 		task.Status = "done"
-		s.emitTransferComplete(task)
+		s.emitTransferComplete(task, task.Status)
 	}()
 	return task.ID, nil
 }
@@ -687,7 +687,7 @@ func (s *S3Session) Put(localPath, remotePath string, recursive bool) (string, e
 			return
 		}
 		task.Status = "done"
-		s.emitTransferComplete(task)
+		s.emitTransferComplete(task, task.Status)
 	}()
 	return task.ID, nil
 }
@@ -712,9 +712,7 @@ func (s *S3Session) PauseTransfer(taskID string) error {
 	if !ok {
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-	task.paused = true
-	task.Status = "paused"
-	s.emitTransferComplete(task)
+	task.setPaused(true, func() { s.emitTransferComplete(task, "paused") })
 	return nil
 }
 
@@ -725,11 +723,7 @@ func (s *S3Session) ResumeTransfer(taskID string) error {
 	if !ok {
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-	task.paused = false
-	task.Status = "running"
-	close(task.pauseCh)
-	task.pauseCh = make(chan struct{})
-	s.emitTransferStart(task)
+	task.setPaused(false, func() { s.emitTransferStart(task) })
 	return nil
 }
 
@@ -796,9 +790,9 @@ func calcLocalDirSize(localDir string) (int64, error) {
 
 func (s *S3Session) downloadDir(remoteDir, localDir string, task *TransferTask) error {
 	// Calculate total size for progress tracking
-	if task.Total <= 0 {
+	if task.total() <= 0 {
 		if total, err := s.calcRemoteDirSize(remoteDir); err == nil {
-			task.Total = total
+			task.setTotal(total)
 		}
 	}
 
@@ -858,14 +852,14 @@ func (s *S3Session) downloadDir(remoteDir, localDir string, task *TransferTask) 
 
 func (s *S3Session) downloadFile(task *TransferTask, remotePath, localPath string) error {
 	// Get file size first for progress tracking
-	if task.Total <= 0 {
+	if task.total() <= 0 {
 		details, err := s.s3.FileDetails(simples3.DetailsInput{
 			Bucket:    s.bucket,
 			ObjectKey: s.s3Key(remotePath),
 		})
 		if err == nil && details.ContentLength != "" {
 			if size, parseErr := strconv.ParseInt(details.ContentLength, 10, 64); parseErr == nil {
-				task.Total = size
+				task.setTotal(size)
 			}
 		}
 	}
@@ -910,9 +904,9 @@ func (s *S3Session) downloadFile(task *TransferTask, remotePath, localPath strin
 
 func (s *S3Session) uploadDir(localDir, remoteDir string, task *TransferTask) error {
 	// Calculate total size for progress tracking
-	if task.Total <= 0 {
+	if task.total() <= 0 {
 		if total, err := calcLocalDirSize(localDir); err == nil {
-			task.Total = total
+			task.setTotal(total)
 		}
 	}
 
@@ -984,8 +978,8 @@ func (s *S3Session) uploadFile(task *TransferTask, localPath, remotePath string)
 	})
 	if err == nil {
 		task.Progress += int64(len(data))
-		if task.Total == 0 {
-			task.Total = int64(len(data))
+		if task.total() == 0 {
+			task.setTotal(int64(len(data)))
 		}
 		s.emitTransferProgress(task)
 	}
@@ -1005,7 +999,7 @@ func (s *S3Session) emitTransferStart(task *TransferTask) {
 		"event":  "start",
 		"tfType": task.Type,
 		"name":   name,
-		"total":  task.Total,
+		"total":  task.total(),
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	s.emitData([]byte("\x1b]633;S" + string(jsonBytes) + "\x07"))
@@ -1017,18 +1011,18 @@ func (s *S3Session) emitTransferProgress(task *TransferTask) {
 		"taskId":   task.ID,
 		"event":    "progress",
 		"progress": task.Progress,
-		"total":    task.Total,
+		"total":    task.total(),
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	s.emitData([]byte("\x1b]633;S" + string(jsonBytes) + "\x07"))
 }
 
-func (s *S3Session) emitTransferComplete(task *TransferTask) {
+func (s *S3Session) emitTransferComplete(task *TransferTask, status string) {
 	payload := map[string]interface{}{
 		"type":   "sftp:transfer",
 		"taskId": task.ID,
 		"event":  "complete",
-		"status": task.Status,
+		"status": status,
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	s.emitData([]byte("\x1b]633;S" + string(jsonBytes) + "\x07"))

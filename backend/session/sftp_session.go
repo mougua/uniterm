@@ -83,7 +83,7 @@ func (s *SFTPSession) Connect(config ConnectionConfig) error {
 		Auth:            authMethods,
 		Timeout:         30 * time.Second,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Config: sshAlgorithms(),
+		Config:          sshAlgorithms(),
 	}
 
 	addr := net.JoinHostPort(config.Host, strconv.Itoa(config.Port))
@@ -261,14 +261,14 @@ func (s *SFTPSession) IsConnected() bool {
 
 // FileItem represents a file entry returned to the frontend.
 type FileItem struct {
-	Name    string `json:"name"`
-	Size    int64  `json:"size"`
-	ModTime string `json:"modTime"`
-	Mode    string `json:"mode"`
-	IsDir   bool   `json:"isDir"`
-	IsHidden bool  `json:"isHidden"`
-	Owner   string `json:"owner"`
-	Group   string `json:"group"`
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	ModTime  string `json:"modTime"`
+	Mode     string `json:"mode"`
+	IsDir    bool   `json:"isDir"`
+	IsHidden bool   `json:"isHidden"`
+	Owner    string `json:"owner"`
+	Group    string `json:"group"`
 }
 
 // FileListResult wraps files + current directory for a list response.
@@ -288,13 +288,35 @@ type TransferTask struct {
 	Status     string // "pending" | "running" | "paused" | "done" | "error" | "cancelled"
 	ctx        context.Context
 	cancel     context.CancelFunc
-	paused     bool
+	pauseMu    sync.Mutex
 	pauseCh    chan struct{}
 }
 
 func (t *TransferTask) start() {
 	t.ctx, t.cancel = context.WithCancel(context.Background())
-	t.pauseCh = make(chan struct{})
+}
+
+func (t *TransferTask) total() int64 {
+	return atomic.LoadInt64(&t.Total)
+}
+
+func (t *TransferTask) setTotal(total int64) {
+	atomic.StoreInt64(&t.Total, total)
+}
+
+func (t *TransferTask) setPaused(paused bool, notify func()) {
+	t.pauseMu.Lock()
+	defer t.pauseMu.Unlock()
+	if t.ctx.Err() != nil || paused == (t.pauseCh != nil) {
+		return
+	}
+	if paused {
+		t.pauseCh = make(chan struct{})
+	} else {
+		close(t.pauseCh)
+		t.pauseCh = nil
+	}
+	notify()
 }
 
 func (t *TransferTask) done() {
@@ -305,15 +327,17 @@ func (t *TransferTask) done() {
 
 func (t *TransferTask) waitIfPaused() {
 	for {
-		if t.paused {
-			select {
-			case <-t.pauseCh:
-				continue
-			case <-t.ctx.Done():
-				return
-			}
+		t.pauseMu.Lock()
+		ch := t.pauseCh
+		t.pauseMu.Unlock()
+		if ch == nil {
+			return
 		}
-		return
+		select {
+		case <-ch:
+		case <-t.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -631,7 +655,7 @@ func (s *SFTPSession) Get(remotePath, localPath string, recursive bool) (string,
 				return
 			}
 			task.Status = "done"
-			s.emitTransferComplete(task)
+			s.emitTransferComplete(task, task.Status)
 		}()
 		return task.ID, nil
 	}
@@ -689,7 +713,7 @@ func (s *SFTPSession) Put(localPath, remotePath string, recursive bool) (string,
 				return
 			}
 			task.Status = "done"
-			s.emitTransferComplete(task)
+			s.emitTransferComplete(task, task.Status)
 		}()
 		return task.ID, nil
 	}
@@ -978,9 +1002,7 @@ func (s *SFTPSession) PauseTransfer(taskID string) error {
 	if !ok {
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-	task.paused = true
-	task.Status = "paused"
-	s.emitTransferComplete(task)
+	task.setPaused(true, func() { s.emitTransferComplete(task, "paused") })
 	return nil
 }
 
@@ -992,13 +1014,9 @@ func (s *SFTPSession) ResumeTransfer(taskID string) error {
 	if !ok {
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-	task.paused = false
-	task.Status = "running"
-		close(task.pauseCh)
-		task.pauseCh = make(chan struct{})
-		s.emitTransferStart(task)
-		return nil
-	}
+	task.setPaused(false, func() { s.emitTransferStart(task) })
+	return nil
+}
 
 // --- Recursive helpers ---
 
@@ -1123,10 +1141,10 @@ func (s *SFTPSession) startTransfer(task *TransferTask) {
 		if s.sem != nil {
 			select {
 			case s.sem <- struct{}{}:
-			defer func() { <-s.sem }()
+				defer func() { <-s.sem }()
 			case <-task.ctx.Done():
 				task.Status = "cancelled"
-				s.emitTransferComplete(task)
+				s.emitTransferComplete(task, task.Status)
 				return
 			}
 		}
@@ -1144,7 +1162,7 @@ func (s *SFTPSession) startTransfer(task *TransferTask) {
 			defer remoteFile.Close()
 			fi, _ := remoteFile.Stat()
 			if fi != nil {
-				task.Total = fi.Size()
+				task.setTotal(fi.Size())
 			}
 			src = remoteFile
 			localFile, e := os.Create(task.LocalPath)
@@ -1165,7 +1183,7 @@ func (s *SFTPSession) startTransfer(task *TransferTask) {
 			defer localFile.Close()
 			fi, _ := localFile.Stat()
 			if fi != nil {
-				task.Total = fi.Size()
+				task.setTotal(fi.Size())
 			}
 			src = localFile
 			remoteFile, e := s.sftpClient.Create(task.RemotePath)
@@ -1183,7 +1201,7 @@ func (s *SFTPSession) startTransfer(task *TransferTask) {
 			select {
 			case <-task.ctx.Done():
 				task.Status = "cancelled"
-				s.emitTransferComplete(task)
+				s.emitTransferComplete(task, task.Status)
 				return
 			default:
 			}
@@ -1191,7 +1209,7 @@ func (s *SFTPSession) startTransfer(task *TransferTask) {
 			select {
 			case <-task.ctx.Done():
 				task.Status = "cancelled"
-				s.emitTransferComplete(task)
+				s.emitTransferComplete(task, task.Status)
 				return
 			default:
 			}
@@ -1211,7 +1229,7 @@ func (s *SFTPSession) startTransfer(task *TransferTask) {
 			}
 		}
 		task.Status = "done"
-		s.emitTransferComplete(task)
+		s.emitTransferComplete(task, task.Status)
 	}()
 }
 
@@ -1349,7 +1367,7 @@ func (s *SFTPSession) emitTransferStart(task *TransferTask) {
 		"event":  "start",
 		"tfType": task.Type,
 		"name":   name,
-		"total":  task.Total,
+		"total":  task.total(),
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	s.emitData([]byte("\x1b]633;S" + string(jsonBytes) + "\x07"))
@@ -1361,18 +1379,18 @@ func (s *SFTPSession) emitTransferProgress(task *TransferTask) {
 		"taskId":   task.ID,
 		"event":    "progress",
 		"progress": task.Progress,
-		"total":    task.Total,
+		"total":    task.total(),
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	s.emitData([]byte("\x1b]633;S" + string(jsonBytes) + "\x07"))
 }
 
-func (s *SFTPSession) emitTransferComplete(task *TransferTask) {
+func (s *SFTPSession) emitTransferComplete(task *TransferTask, status string) {
 	payload := map[string]interface{}{
 		"type":   "sftp:transfer",
 		"taskId": task.ID,
 		"event":  "complete",
-		"status": task.Status,
+		"status": status,
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	s.emitData([]byte("\x1b]633;S" + string(jsonBytes) + "\x07"))

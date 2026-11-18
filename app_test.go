@@ -5,12 +5,55 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
+func TestApp_ChatCompletionRejectsNullRequest(t *testing.T) {
+	a := NewApp("")
+	if _, err := a.ChatCompletion("", "", "", "null", "anthropic", ""); err == nil {
+		t.Fatal("expected an error for a null request")
+	}
+}
+
+func TestApp_ChatCompletionAnthropicTextBlock(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		text    string
+		want    string
+		wantErr bool
+	}{
+		{name: "valid text", text: `"hello"`, want: "hello world"},
+		{name: "null text", text: "null", want: " world"},
+		{name: "invalid text", text: "42", wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\",\"text\":%s}}\n\n", tt.text)
+				fmt.Fprint(w, "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\n")
+				fmt.Fprint(w, "data: {\"type\":\"content_block_stop\"}\n\ndata: {\"type\":\"message_stop\"}\n\n")
+			}))
+			defer server.Close()
+
+			a := NewApp("")
+			result, err := a.ChatCompletion("", server.URL, "", "{}", "anthropic", "")
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "invalid text in Anthropic content block") {
+					t.Fatalf("expected an invalid text error, got %v", err)
+				}
+				return
+			}
+			if err != nil || !strings.Contains(result, fmt.Sprintf("%q", tt.want)) {
+				t.Fatalf("expected text %q, got %s (error: %v)", tt.want, result, err)
+			}
+		})
+	}
+}
 
 // TestApp_StartupError_CapturesSingleError verifies that a single error
 // sent during startup() surfaces through StartupError() after

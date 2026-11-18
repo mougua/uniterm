@@ -52,6 +52,8 @@ type SSHSession struct {
 	stderr       io.Reader
 	quit         chan struct{}
 	quitOnce     sync.Once
+	lifecycleMu  sync.Mutex
+	started      bool
 	authAnswerCh chan []byte
 	expectOutput *postLoginOutputBuffer
 	x11Forwarder *x11Forwarder
@@ -88,6 +90,8 @@ func NewSSHSession(id string) *SSHSession {
 // OpenSSH for Windows this is "windows-openssh"; otherwise it is empty
 // (undetermined). Read-only and set once during Connect.
 func (s *SSHSession) RemoteOS() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.remoteOS
 }
 
@@ -98,9 +102,34 @@ func shouldPromptForSSHPassword(config ConnectionConfig) bool {
 	return config.AuthType == "" || config.AuthType == "password"
 }
 
-func (s *SSHSession) Connect(config ConnectionConfig) error {
-	s.SetLogOnConnect(config.LogOnConnect)
+func (s *SSHSession) Connect(config ConnectionConfig) (connectErr error) {
+	s.lifecycleMu.Lock()
+	select {
+	case <-s.quit:
+		s.lifecycleMu.Unlock()
+		return context.Canceled
+	default:
+	}
+	if s.started {
+		s.lifecycleMu.Unlock()
+		return nil
+	}
+	s.started = true
 	s.setStatus(StatusConnecting)
+	s.lifecycleMu.Unlock()
+	defer func() {
+		if connectErr != nil {
+			s.lifecycleMu.Lock()
+			defer s.lifecycleMu.Unlock()
+			select {
+			case <-s.quit:
+				connectErr = context.Canceled
+			default:
+				s.setStatus(StatusError)
+			}
+		}
+	}()
+	s.SetLogOnConnect(config.LogOnConnect)
 	if config.Name != "" {
 		s.title = config.Name
 	} else {
@@ -127,6 +156,8 @@ func (s *SSHSession) Connect(config ConnectionConfig) error {
 	promptLoop:
 		for {
 			select {
+			case <-s.quit:
+				return context.Canceled
 			case data := <-s.authAnswerCh:
 				for _, b := range data {
 					switch b {
@@ -178,6 +209,8 @@ func (s *SSHSession) Connect(config ConnectionConfig) error {
 		loop:
 			for {
 				select {
+				case <-s.quit:
+					return nil, context.Canceled
 				case data := <-s.authAnswerCh:
 					for _, b := range data {
 						switch b {
@@ -222,26 +255,51 @@ func (s *SSHSession) Connect(config ConnectionConfig) error {
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 
+	connectDone := make(chan struct{})
+	defer close(connectDone)
 	client, err := dialSSHWithCipherFallback(addr, clientConfig, func() (net.Conn, error) {
-		return dialFirstHop(addr, config.Proxy)
+		select {
+		case <-s.quit:
+			return nil, context.Canceled
+		default:
+		}
+		conn, err := dialFirstHop(addr, config.Proxy)
+		if err != nil {
+			return nil, err
+		}
+		go func() {
+			select {
+			case <-s.quit:
+				_ = conn.Close()
+			case <-connectDone:
+			}
+		}()
+		return conn, nil
 	})
 	if err != nil {
-		s.setStatus(StatusError)
 		return err
 	}
+	var forwarder *x11Forwarder
+	defer func() {
+		if connectErr != nil {
+			if forwarder != nil {
+				forwarder.stop()
+			}
+			_ = client.Close()
+		}
+	}()
 
 	// Detect Windows OpenSSH from the server identification string exchanged
 	// during the handshake. This is available before any auth/shell and needs
 	// no extra round-trip; the marker "for_Windows" only appears in Microsoft's
 	// OpenSSH fork.
+	var remoteOS string
 	if strings.Contains(string(client.ServerVersion()), windowsOpenSSHMarker) {
-		s.remoteOS = remoteOSWindowsOpenSSH
+		remoteOS = remoteOSWindowsOpenSSH
 	}
 
 	session, err := client.NewSession()
 	if err != nil {
-		client.Close()
-		s.setStatus(StatusError)
 		return fmt.Errorf("new session: %w", err)
 	}
 
@@ -270,45 +328,33 @@ func (s *SSHSession) Connect(config ConnectionConfig) error {
 		fwd, ferr := startX11Forward(client, session, xauthPath, resolvedDisplay)
 		switch {
 		case ferr == nil, errors.Is(ferr, errX11TrustedFallback):
-			s.x11Forwarder = fwd
+			forwarder = fwd
 		default:
 			s.emitData([]byte("\r\n\x1b[31m[x11: " + ferr.Error() + "]\x1b[0m\r\n"))
 		}
-		if s.x11Forwarder != nil {
-			s.x11Forwarder.onError = func(msg string) {
+		if forwarder != nil {
+			forwarder.onError = func(msg string) {
 				s.emitData([]byte("\r\n\x1b[33m" + msg + "\x1b[0m\r\n"))
 			}
 		}
 	}
 
 	if err := session.RequestPty("xterm-256color", rows, cols, modes); err != nil {
-		session.Close()
-		client.Close()
-		s.setStatus(StatusError)
 		return fmt.Errorf("request pty: %w", err)
 	}
 
 	stdinPipe, err := session.StdinPipe()
 	if err != nil {
-		session.Close()
-		client.Close()
-		s.setStatus(StatusError)
 		return fmt.Errorf("stdin pipe: %w", err)
 	}
 
 	stdoutPipe, err := session.StdoutPipe()
 	if err != nil {
-		session.Close()
-		client.Close()
-		s.setStatus(StatusError)
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
 
 	stderrPipe, err := session.StderrPipe()
 	if err != nil {
-		session.Close()
-		client.Close()
-		s.setStatus(StatusError)
 		return fmt.Errorf("stderr pipe: %w", err)
 	}
 
@@ -319,6 +365,25 @@ func (s *SSHSession) Connect(config ConnectionConfig) error {
 		return fmt.Errorf("shell: %w", err)
 	}
 
+	s.lifecycleMu.Lock()
+	select {
+	case <-s.quit:
+		s.lifecycleMu.Unlock()
+		return context.Canceled
+	default:
+	}
+	s.mu.Lock()
+	s.client = client
+	s.session = session
+	s.stdin = stdinPipe
+	s.stdout = stdoutPipe
+	s.stderr = stderrPipe
+	s.remoteOS = remoteOS
+	s.x11Forwarder = forwarder
+	s.mu.Unlock()
+	s.setStatus(StatusConnected)
+	s.lifecycleMu.Unlock()
+
 	go func() {
 		werr := session.Wait()
 		last, _ := s.lastRecv.Load().([]byte)
@@ -326,13 +391,6 @@ func (s *SSHSession) Connect(config ConnectionConfig) error {
 		log.Writef("ssh disconnect: session.Wait returned (%v), %s lastRecv=%s lastSent=%s", werr, s.kaDiag(), tailHex(last, 64), tailHex(sent, 32))
 		s.Disconnect()
 	}()
-
-	s.client = client
-	s.session = session
-	s.stdin = stdinPipe
-	s.stdout = stdoutPipe
-	s.stderr = stderrPipe
-	s.setStatus(StatusConnected)
 
 	// Apply pending terminal size if one was set before connection.
 	if cols, rows := s.GetPendingSize(); cols > 0 && rows > 0 {
@@ -529,17 +587,22 @@ func (s *SSHSession) Write(data []byte) error {
 	// During keyboard-interactive auth, route input to the auth callback.
 	s.mu.RLock()
 	ch := s.authAnswerCh
+	stdin := s.stdin
 	s.mu.RUnlock()
 	if ch != nil {
-		ch <- data
-		return nil
+		select {
+		case ch <- data:
+			return nil
+		case <-s.quit:
+			return context.Canceled
+		}
 	}
-	if s.stdin == nil {
+	if stdin == nil {
 		return fmt.Errorf("not connected")
 	}
 	enc := s.encodeInput(data)
 	s.lastSent.Store(append([]byte(nil), enc...))
-	_, err := s.stdin.Write(enc)
+	_, err := stdin.Write(enc)
 	return err
 }
 
@@ -549,7 +612,9 @@ func (s *SSHSession) Write(data []byte) error {
 // failure, or explicit user close).
 func (s *SSHSession) Disconnect() error {
 	s.quitOnce.Do(func() {
+		s.lifecycleMu.Lock()
 		close(s.quit)
+		s.lifecycleMu.Unlock()
 		if s.x11Forwarder != nil {
 			s.x11Forwarder.stop()
 			s.x11Forwarder = nil
@@ -568,7 +633,10 @@ func (s *SSHSession) Disconnect() error {
 func (s *SSHSession) Resize(cols, rows int) error {
 	// Always save the desired size so it can be applied after Connect finishes.
 	s.SetPendingSize(cols, rows)
-	if s.session == nil {
+	s.mu.RLock()
+	session := s.session
+	s.mu.RUnlock()
+	if session == nil {
 		// The frontend fits the terminal as soon as a session is created, which
 		// races Connect(). The pending size above is retained and applied once
 		// Connect establishes the shell channel, so a nil channel here is a
@@ -576,7 +644,7 @@ func (s *SSHSession) Resize(cols, rows int) error {
 		// produces spurious "session not connected" errors in the dev log.
 		return nil
 	}
-	return s.session.WindowChange(rows, cols)
+	return session.WindowChange(rows, cols)
 }
 
 func (s *SSHSession) IsConnected() bool {

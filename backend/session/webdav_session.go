@@ -56,7 +56,7 @@ func (s *WebDAVSession) Connect(config ConnectionConfig) error {
 	return nil
 }
 
-func (s *WebDAVSession) Write(data []byte) error  { return nil }
+func (s *WebDAVSession) Write(data []byte) error     { return nil }
 func (s *WebDAVSession) Resize(cols, rows int) error { return nil }
 
 func (s *WebDAVSession) Disconnect() error {
@@ -300,7 +300,7 @@ func (s *WebDAVSession) Get(remotePath, localPath string, recursive bool) (strin
 			return
 		}
 		task.Status = "done"
-		s.emitTransferComplete(task)
+		s.emitTransferComplete(task, task.Status)
 	}()
 	return task.ID, nil
 }
@@ -348,7 +348,7 @@ func (s *WebDAVSession) Put(localPath, remotePath string, recursive bool) (strin
 			return
 		}
 		task.Status = "done"
-		s.emitTransferComplete(task)
+		s.emitTransferComplete(task, task.Status)
 	}()
 	return task.ID, nil
 }
@@ -373,9 +373,7 @@ func (s *WebDAVSession) PauseTransfer(taskID string) error {
 	if !ok {
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-	task.paused = true
-	task.Status = "paused"
-	s.emitTransferComplete(task)
+	task.setPaused(true, func() { s.emitTransferComplete(task, "paused") })
 	return nil
 }
 
@@ -386,11 +384,7 @@ func (s *WebDAVSession) ResumeTransfer(taskID string) error {
 	if !ok {
 		return fmt.Errorf("task not found: %s", taskID)
 	}
-	task.paused = false
-	task.Status = "running"
-	close(task.pauseCh)
-	task.pauseCh = make(chan struct{})
-	s.emitTransferStart(task)
+	task.setPaused(false, func() { s.emitTransferStart(task) })
 	return nil
 }
 
@@ -417,9 +411,9 @@ func (s *WebDAVSession) calcWebdavRemoteDirSize(remoteDir string) (int64, error)
 
 func (s *WebDAVSession) downloadDir(remoteDir, localDir string, task *TransferTask) error {
 	// Calculate total size for progress tracking
-	if task.Total <= 0 {
+	if task.total() <= 0 {
 		if total, err := s.calcWebdavRemoteDirSize(remoteDir); err == nil {
-			task.Total = total
+			task.setTotal(total)
 		}
 	}
 	if err := os.MkdirAll(localDir, 0755); err != nil {
@@ -452,10 +446,10 @@ func (s *WebDAVSession) downloadDir(remoteDir, localDir string, task *TransferTa
 
 func (s *WebDAVSession) downloadFile(task *TransferTask, remotePath, localPath string) error {
 	// Get file size first for progress tracking
-	if task.Total <= 0 {
+	if task.total() <= 0 {
 		if fi, err := s.client.Stat(remotePath); err == nil {
 			if fi.Size() > 0 {
-				task.Total = fi.Size()
+				task.setTotal(fi.Size())
 			}
 		}
 	}
@@ -495,9 +489,9 @@ func (s *WebDAVSession) downloadFile(task *TransferTask, remotePath, localPath s
 
 func (s *WebDAVSession) uploadDir(localDir, remoteDir string, task *TransferTask) error {
 	// Calculate total size for progress tracking
-	if task.Total <= 0 {
+	if task.total() <= 0 {
 		if total, err := calcLocalDirSize(localDir); err == nil {
-			task.Total = total
+			task.setTotal(total)
 		}
 	}
 
@@ -540,8 +534,8 @@ func (s *WebDAVSession) uploadFile(task *TransferTask, localPath, remotePath str
 		return err
 	}
 	// Set total size from file stat for progress tracking
-	if task.Total <= 0 && fi.Size() > 0 {
-		task.Total = fi.Size()
+	if task.total() <= 0 && fi.Size() > 0 {
+		task.setTotal(fi.Size())
 	}
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
@@ -593,7 +587,7 @@ func (s *WebDAVSession) emitTransferStart(task *TransferTask) {
 		"event":  "start",
 		"tfType": task.Type,
 		"name":   name,
-		"total":  task.Total,
+		"total":  task.total(),
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	s.emitData([]byte("\x1b]633;S" + string(jsonBytes) + "\x07"))
@@ -605,18 +599,18 @@ func (s *WebDAVSession) emitTransferProgress(task *TransferTask) {
 		"taskId":   task.ID,
 		"event":    "progress",
 		"progress": task.Progress,
-		"total":    task.Total,
+		"total":    task.total(),
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	s.emitData([]byte("\x1b]633;S" + string(jsonBytes) + "\x07"))
 }
 
-func (s *WebDAVSession) emitTransferComplete(task *TransferTask) {
+func (s *WebDAVSession) emitTransferComplete(task *TransferTask, status string) {
 	payload := map[string]interface{}{
 		"type":   "sftp:transfer",
 		"taskId": task.ID,
 		"event":  "complete",
-		"status": task.Status,
+		"status": status,
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	s.emitData([]byte("\x1b]633;S" + string(jsonBytes) + "\x07"))

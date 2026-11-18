@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -1883,6 +1884,12 @@ func (a *App) launchConnectGoroutine(s session.Session, sessionType string, conf
 		}
 
 		if err := s.Connect(config); err != nil {
+			if errors.Is(err, context.Canceled) {
+				if a.tunnelService != nil {
+					a.tunnelService.Stop(s.ID())
+				}
+				return
+			}
 			a.failSessionConnect(s, err)
 		}
 	}()
@@ -2466,6 +2473,9 @@ func (a *App) ChatCompletion(apiKey, baseURL, model string, requestJSON string, 
 	if err := json.Unmarshal([]byte(requestJSON), &reqBody); err != nil {
 		return "", fmt.Errorf("invalid request JSON: %w", err)
 	}
+	if reqBody == nil {
+		return "", fmt.Errorf("invalid request JSON: expected an object")
+	}
 
 	if userAgent == "" {
 		userAgent = "uniTerm"
@@ -2644,8 +2654,10 @@ func (a *App) chatCompletionAnthropic(apiKey, baseURL, model string, reqBody map
 			if block, ok := event["content_block"].(map[string]interface{}); ok {
 				currentBlock = block
 				a.emit("ai:block_start", map[string]interface{}{
-					"index":         currentBlockIndex,
-					"content_block": block,
+					"index": currentBlockIndex,
+					// Wails serializes events asynchronously while the stream
+					// continues updating the original block's fields.
+					"content_block": maps.Clone(block),
 				})
 			}
 
@@ -2656,10 +2668,11 @@ func (a *App) chatCompletionAnthropic(apiKey, baseURL, model string, reqBody map
 			if deltaType == "text_delta" {
 				text, _ := delta["text"].(string)
 				if currentBlock != nil {
-					if currentBlock["text"] == nil {
-						currentBlock["text"] = ""
+					previous, ok := currentBlock["text"].(string)
+					if !ok && currentBlock["text"] != nil {
+						return "", fmt.Errorf("invalid text in Anthropic content block %d", currentBlockIndex)
 					}
-					currentBlock["text"] = currentBlock["text"].(string) + text
+					currentBlock["text"] = previous + text
 				}
 				a.emit("ai:token", map[string]interface{}{
 					"text":  text,
@@ -3094,7 +3107,7 @@ func (a *App) chatCompletionOpenAI(apiKey, baseURL, model string, reqBody map[st
 				// F-320: typed payload.
 				a.emit("ai:block_start", aiBlockStartEvent{
 					Index:        currentBlockIndex,
-					ContentBlock: currentBlock,
+					ContentBlock: maps.Clone(currentBlock),
 				})
 			}
 			currentTextBuf.WriteString(delta.Content)
@@ -3504,7 +3517,7 @@ func (a *App) chatCompletionResponses(apiKey, baseURL, model string, reqBody map
 				// F-320: typed payload.
 				a.emit("ai:block_start", aiBlockStartEvent{
 					Index:        nextBlockIndex,
-					ContentBlock: block,
+					ContentBlock: maps.Clone(block),
 				})
 				nextBlockIndex++
 			case "function_call":
