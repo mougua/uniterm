@@ -1,17 +1,20 @@
 # build.ps1 — Windows 下构建 uniTerm
 # 用法（在项目根目录）：
 #   powershell -ExecutionPolicy Bypass -File build.ps1
-#   powershell -ExecutionPolicy Bypass -File build.ps1 -Compress
+#   .\build.ps1 -Compress:$false  # 跳过 UPX 压缩
 # 产物：bin\uniTerm.exe
 
-param([switch]$Compress)
+param([switch]$Compress = $true)
 
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
 $upx = $null
 if ($Compress) {
-    $upx = (Get-Command upx.exe -CommandType Application -ErrorAction Stop).Source
+    $upx = 'D:\upx-5.2.0-win64\upx.exe'
+    if (-not (Test-Path -LiteralPath $upx -PathType Leaf)) {
+        $upx = (Get-Command upx.exe -CommandType Application -ErrorAction Stop).Source
+    }
 }
 
 # 1. 确保 wails3 可用（GOPATH\bin 可能不在 PATH 里）
