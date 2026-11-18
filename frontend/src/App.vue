@@ -1273,6 +1273,7 @@ function closeStartAndReposition(prevTab: any): (newTabId: string) => void {
 }
 
 async function onConnect(config: ConnectionConfig, keepOpen?: boolean, wasEdit?: boolean, persist = true) {
+  if (config.openSSHHost) persist = false
   const prev = tabStore.activeTab
   const prevStart = (prev?.type === 'start' && !keepOpen) ? prev : undefined
   // Persist form changes BEFORE dispatching by type. The type-specific

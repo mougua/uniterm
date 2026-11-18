@@ -1,4 +1,11 @@
 {
+  "openSSH.title": "SSH 設定主機",
+  "openSSH.search": "搜尋主機或輸入別名",
+  "openSSH.noMatches": "沒有符合的主機，可以使用輸入的別名連線。",
+  "openSSH.empty": "找不到主機別名，可以手動輸入。",
+  "openSSH.readError": "無法讀取 SSH 設定：{error}",
+  "openSSH.refresh": "重新整理",
+  "openSSH.connect": "連線",
   "header.connections": "連線列表",
   "header.newConnection": "新增連線",
   "header.settings": "設定",

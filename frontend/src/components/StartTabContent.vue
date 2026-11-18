@@ -90,8 +90,8 @@
             @contextmenu.prevent="onContextMenu($event, config, 'recent:')"
           >
             <div class="start-card-top">
-              <div class="start-card-icon" :class="config.type">
-                <el-icon v-if="config.type === 'ssh'"><SquareTerminal :size="28" /></el-icon>
+              <div class="start-card-icon" :class="config.openSSHHost ? 'ssh' : config.type">
+                <el-icon v-if="config.openSSHHost || config.type === 'ssh'"><SquareTerminal :size="28" /></el-icon>
                 <el-icon v-else-if="config.type === 'telnet'"><Terminal :size="28" /></el-icon>
                 <el-icon v-else-if="config.type === 'mosh'"><Zap :size="28" /></el-icon>
                 <el-icon v-else-if="config.type === 'local'"><Laptop :size="28" /></el-icon>
@@ -315,6 +315,8 @@
 
     <!-- Context menu -->
     <Menu ref="contextMenuRef" v-model:visible="contextMenuVisible">
+      <MenuItem v-if="contextMenuConfig?.openSSHHost" @click="doConnect(contextMenuConfig, $event)">{{ t('sidebar.connectSSH') }}</MenuItem>
+      <template v-else>
       <!-- Terminal -->
       <MenuItem v-if="contextMenuConfig && contextMenuConfig.type === 'ssh'" :class="{ disabled: selectedIds.size > 1 }" @click="selectedIds.size <= 1 && doConnect(contextMenuConfig, $event)">{{ t('sidebar.connectSSH') }}</MenuItem>
       <MenuItem v-if="contextMenuConfig && contextMenuConfig.type === 'telnet'" :class="{ disabled: selectedIds.size > 1 }" @click="selectedIds.size <= 1 && doConnect(contextMenuConfig, $event)">{{ t('sidebar.connectTelnet') }}</MenuItem>
@@ -343,6 +345,7 @@
       <MenuItem :class="{ disabled: selectedIds.size > 1 }" @click="selectedIds.size <= 1 && doDuplicate(contextMenuConfig)">{{ t('sidebar.duplicate') }}</MenuItem>
       <MenuDivider />
       <MenuItem class="danger" @click="doDeleteBulk">{{ t('sidebar.delete') }}</MenuItem>
+      </template>
     </Menu>
 
     <!-- Group context menu -->
@@ -416,7 +419,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { msg } from '../services/message'
 import type { StartTab } from '../types/workspace'
@@ -425,7 +428,9 @@ import { useConnectionStore } from '../stores/connectionStore'
 import { useTabStore } from '../stores/tabStore'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useI18n } from '../i18n'
+import { Events } from '@wailsio/runtime'
 import { GetRecentConnections } from '../../bindings/github.com/ys-ll/uniterm/app'
+import { openSSHRecentConfig } from '../utils/openSSH'
 import { formatConnSubtitle, getConnectionTypeKey, getTypeCategory, formatTypeFilterLabel, getTypeFilterCatalog, isWindows } from '../utils/quickConnect'
 import Menu from './Menu.vue'
 import MenuItem from './MenuItem.vue'
@@ -474,7 +479,7 @@ function handleDefaultLocalTerminal() {
 
 // ── Card subtitle (matches sidebar display format) ──
 function getCardSubtitle(config: ConnectionConfig): string {
-  return formatConnSubtitle(config, getShellLabel)
+  return config.openSSHHost ? 'SSH · ~/.ssh/config' : formatConnSubtitle(config, getShellLabel)
 }
 
 // ── Multi-select ──
@@ -535,6 +540,7 @@ const TYPE_LABELS: Record<string, string> = {
 // new-connection form) → concrete types present in connections.
 const filterGroups = computed(() => {
   const connKeys = new Set(connectionStore.connections.map(c => getConnectionTypeKey(c)))
+  if (props.tab.viewMode === 'home' && recentConnectionIds.value.some(id => openSSHRecentConfig(id))) connKeys.add('ssh')
   const catalog = getTypeFilterCatalog(t, isWindows)
   const catalogKeys = new Set(catalog.flatMap(g => g.items.map(i => i.key)))
 
@@ -564,6 +570,7 @@ const filterDisplay = computed(() => {
 
 function matchTypeFilter(conn: ConnectionConfig, filter: string): boolean {
   if (filter === 'all') return true
+  if (conn.openSSHHost) return filter === 'ssh'
   if (filter.startsWith('database:')) {
     return conn.type === 'database' && conn.dbType === filter.slice('database:'.length)
   }
@@ -605,33 +612,40 @@ function getShellLabel(path: string): string {
 
 // ── Recent connections ──
 const recentConnectionIds = ref<string[]>([])
+let recentLoadVersion = 0
+let unsubscribeRecent: (() => void) | undefined
 
-async function loadRecent() {
+async function loadRecentConnections() {
+  const version = ++recentLoadVersion
   try {
-    recentConnectionIds.value = await GetRecentConnections()
-  } catch {
-    recentConnectionIds.value = []
+    const ids = await GetRecentConnections()
+    if (version === recentLoadVersion) recentConnectionIds.value = ids ?? []
+  } catch (error) {
+    console.error('Failed to load recent connections:', error)
   }
 }
-loadRecent()
 
-// Refresh the recent list when connections are added/removed, so a newly
-// created connection shows up in "Recent" without requiring a reload.
-watch(
-  () => connectionStore.connections.map(c => c.id),
-  () => loadRecent()
-)
+onMounted(() => {
+  unsubscribeRecent = Events.On('recent:changed', loadRecentConnections)
+  void loadRecentConnections()
+})
+
+onUnmounted(() => unsubscribeRecent?.())
+
+function findConnection(id: string): ConnectionConfig | undefined {
+  return connectionStore.connections.find(c => c.id === id) ?? openSSHRecentConfig(id)
+}
 
 const recentConfigs = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
   return recentConnectionIds.value
-    .map(id => connectionStore.connections.find(c => c.id === id))
+    .map(findConnection)
     .filter((c): c is ConnectionConfig => !!c)
     .filter(c => matchTypeFilter(c, selectedTypeFilter.value))
     .filter(c => !query ||
       c.name.toLowerCase().includes(query) ||
       (c.host || '').toLowerCase().includes(query) ||
-      c.type.toLowerCase().includes(query))
+      (c.openSSHHost ? 'ssh' : c.type.toLowerCase()).includes(query))
     .slice(0, 12)
 })
 
@@ -1002,7 +1016,7 @@ function onKeydown(e: KeyboardEvent) {
     const ids = getSelectedConnectionIds()
     if (ids.length > 1) {
       // Bulk connect: open all selected connections
-      const configs = ids.map(id => connectionStore.connections.find(c => c.id === id)).filter(Boolean) as ConnectionConfig[]
+      const configs = ids.map(findConnection).filter((config): config is ConnectionConfig => !!config)
       for (const c of configs) {
         emit('connect', c, e.ctrlKey || e.metaKey)
       }
@@ -1222,14 +1236,14 @@ function doEditConnection(config: ConnectionConfig | null) {
 }
 
 function doChangeGroupBulk() {
-  const ids = getSelectedConnectionIds()
+  const ids = getSelectedConnectionIds().filter(id => !openSSHRecentConfig(id))
   if (ids.length === 0) return
   closeContextMenu()
   emit('change-group-ids', ids)
 }
 
 async function doDeleteBulk() {
-  const ids = getSelectedConnectionIds()
+  const ids = getSelectedConnectionIds().filter(id => !openSSHRecentConfig(id))
   if (ids.length === 0) return
   closeContextMenu()
   try {

@@ -111,6 +111,7 @@ func (s *LocalSession) updateMouseTrackingState(data []byte) {
 		}
 	}
 }
+
 type LocalSession struct {
 	baseSession
 	cpty                 *conpty.ConPty
@@ -168,7 +169,17 @@ func (s *LocalSession) Connect(config ConnectionConfig) error {
 	var cmd *exec.Cmd
 	isMSYSBash := false
 
-	if distro, ok := parseWSLPath(shell); ok {
+	if config.OpenSSHHost != "" {
+		var err error
+		cmd, err = openSSHCommand(config.OpenSSHHost)
+		if err != nil {
+			s.setStatus(StatusError)
+			return err
+		}
+		s.title = config.OpenSSHHost
+		commandLine = syscall.EscapeArg(cmd.Path) + " -- " + syscall.EscapeArg(config.OpenSSHHost)
+		cmd.Env = os.Environ()
+	} else if distro, ok := parseWSLPath(shell); ok {
 		if distro == "" {
 			s.setStatus(StatusError)
 			return fmt.Errorf("empty WSL distribution name")
@@ -222,7 +233,16 @@ func (s *LocalSession) Connect(config ConnectionConfig) error {
 			go s.runPostLoginScript(config.PostLoginScript)
 			return nil
 		}
+		if config.OpenSSHHost != "" {
+			s.setStatus(StatusError)
+			return fmt.Errorf("start OpenSSH console: %w", err)
+		}
 		// Fall through to pipe mode if ConPTY fails.
+	}
+
+	if config.OpenSSHHost != "" {
+		s.setStatus(StatusError)
+		return fmt.Errorf("interactive OpenSSH requires ConPTY")
 	}
 
 	// Pipe fallback using cmd built above.

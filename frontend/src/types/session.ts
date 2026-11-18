@@ -34,6 +34,7 @@ export interface ConnectionConfig {
   rdpEnableNLA?: boolean
   // Local terminal shell path
   shellPath?: string
+  openSSHHost?: string
   // Working directory for local terminal (defaults to user home)
   cwd?: string
   // Serial port

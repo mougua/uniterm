@@ -1,4 +1,11 @@
 {
+  "openSSH.title": "SSH Config Hosts",
+  "openSSH.search": "Search hosts or enter an alias",
+  "openSSH.noMatches": "No aliases match. You can connect using the alias you entered.",
+  "openSSH.empty": "No host aliases found. You can enter one manually.",
+  "openSSH.readError": "Could not read SSH config: {error}",
+  "openSSH.refresh": "Refresh",
+  "openSSH.connect": "Connect",
   "header.connections": "Connections",
   "header.newConnection": "New Connection",
   "header.settings": "Settings",

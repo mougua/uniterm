@@ -119,7 +119,17 @@ func (s *LocalSession) Connect(config ConnectionConfig) error {
 
 	s.title = shellName(shell)
 
-	s.cmd = exec.Command(shell, loginShellArgs(shell)...)
+	if config.OpenSSHHost != "" {
+		cmd, err := openSSHCommand(config.OpenSSHHost)
+		if err != nil {
+			s.setStatus(StatusError)
+			return err
+		}
+		s.cmd = cmd
+		s.title = config.OpenSSHHost
+	} else {
+		s.cmd = exec.Command(shell, loginShellArgs(shell)...)
+	}
 	s.cmd.Env = ensureTerminalEnv(os.Environ())
 	s.cmd.Dir = workDir
 
@@ -400,6 +410,7 @@ func loginShellArgs(shellPath string) []string {
 //     cannot compose multibyte UTF-8 — garbled CJK/IME input.
 //   - missing TERM: zsh's ZLE has no terminfo to redraw the line, so backspace
 //     and other editing keys leave the display out of sync and appear broken.
+//
 // bash/sh tolerate both; zsh's ZLE does not. We inject each variable only when
 // it is not already set so we never override the user's explicit configuration.
 func ensureTerminalEnv(env []string) []string {

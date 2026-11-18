@@ -1,4 +1,11 @@
 {
+  "openSSH.title": "SSH 配置主机",
+  "openSSH.search": "搜索主机或输入别名",
+  "openSSH.noMatches": "没有匹配的主机，可以使用输入的别名连接。",
+  "openSSH.empty": "未找到主机别名，可以手动输入。",
+  "openSSH.readError": "无法读取 SSH 配置：{error}",
+  "openSSH.refresh": "刷新",
+  "openSSH.connect": "连接",
   "header.connections": "连接列表",
   "header.newConnection": "新建连接",
   "header.settings": "设置",

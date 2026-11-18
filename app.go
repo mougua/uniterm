@@ -751,6 +751,11 @@ func (a *App) ParseImportFile(format, srcPath, password string) (*importer.Impor
 	return importer.Parse(format, srcPath, importer.ParseOptions{Password: password})
 }
 
+// ListOpenSSHHosts lists aliases from the current user's OpenSSH configuration.
+func (a *App) ListOpenSSHHosts() ([]string, error) {
+	return session.OpenSSHAliases()
+}
+
 // ApplyImport merges parsed connections into the existing store and saves,
 // reusing existing groups by path. The saved result is broadcast via the
 // existing store:connections:changed event.
@@ -1891,6 +1896,10 @@ func (a *App) launchConnectGoroutine(s session.Session, sessionType string, conf
 				return
 			}
 			a.failSessionConnect(s, err)
+			return
+		}
+		if config.OpenSSHHost != "" && sessionType == "local" {
+			a.RecordRecentConnection(config.ID)
 		}
 	}()
 }
@@ -2455,6 +2464,7 @@ func (a *App) RecordRecentConnection(connId string) {
 		return
 	}
 	a.recentStore.Record(connId)
+	a.emit("recent:changed")
 }
 
 func (a *App) GetRecentConnections() []string {

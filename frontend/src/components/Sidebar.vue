@@ -8,6 +8,7 @@
     <div class="resize-handle" @mousedown="onResizeStart" />
     <div class="sidebar-header">
       <button class="sidebar-tab" :class="{ active: activeView === 'connections' }" @click="activeView = 'connections'" :title="t('header.connections')"><el-icon><Network :size="14" /></el-icon></button>
+      <button class="sidebar-tab" :class="{ active: activeView === 'openSSH' }" :aria-pressed="activeView === 'openSSH'" @click="activeView = 'openSSH'" :title="t('openSSH.title')" :aria-label="t('openSSH.title')"><el-icon><KeyRound :size="14" /></el-icon></button>
       <button class="sidebar-tab" :class="{ active: activeView === 'files' }" @click="onFilesTabClick" :title="t('header.files')"><el-icon><FolderTree :size="14" /></el-icon></button>
       <button class="sidebar-tab" :class="{ active: activeView === 'monitor' }" @click="onMonitorTabClick" :title="t('header.monitor')"><el-icon><Activity :size="14" /></el-icon></button>
       <button class="sidebar-tab" :class="{ active: activeView === 'quickCommands' }" @click="activeView = 'quickCommands'" :title="t('quickCommands.quickCommandsTab')"><el-icon><Zap :size="14" /></el-icon></button>
@@ -170,6 +171,8 @@
       </div>
     </div>
     </template>
+
+    <OpenSSHPanel v-if="activeView === 'openSSH'" @connect="host => emit('connectOnly', openSSHConfig(host))" />
 
     <QuickCommandsPanel v-if="activeView === 'quickCommands'" />
 
@@ -447,7 +450,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch, nextTick, provide } from 'vue'
-import { X, ChevronRight, ChevronDown, Filter, Check, Network, Zap, Clock, Plus, Palette, SquareTerminal, Terminal, FolderUp, HardDrive, Cloud, Globe, Monitor, MonitorCloud, MonitorSmartphone, Database, DatabaseZap, Layers, DatabaseSearch, Activity, Laptop, Cable, Pencil, MoreHorizontal, FolderTree, ShipWheel, Boxes, AppWindow } from '@lucide/vue'
+import { X, ChevronRight, ChevronDown, Filter, Check, Network, Zap, Clock, Plus, Palette, SquareTerminal, Terminal, FolderUp, HardDrive, Cloud, Globe, Monitor, MonitorCloud, MonitorSmartphone, Database, DatabaseZap, Layers, DatabaseSearch, Activity, Laptop, Cable, Pencil, MoreHorizontal, FolderTree, ShipWheel, Boxes, AppWindow, KeyRound } from '@lucide/vue'
 import { ElMessageBox } from 'element-plus'
 import { msg } from '../services/message'
 import { useConnectionStore } from '../stores/connectionStore'
@@ -459,6 +462,8 @@ import { useI18n } from '../i18n'
 import ConnectionForm from './ConnectionForm.vue'
 import ExportDialog from './ExportDialog.vue'
 import ImportDialog from './ImportDialog.vue'
+import OpenSSHPanel from './OpenSSHPanel.vue'
+import { openSSHConfig } from '../utils/openSSH'
 import QuickCommandsPanel from './QuickCommandsPanel.vue'
 import HistoryPanel from './HistoryPanel.vue'
 import FileSidebar from './FileSidebar.vue'
@@ -501,8 +506,9 @@ const openPanelConnIds = computed<Set<string>>(() => {
 const showForm = ref(false)
 const showExportDialog = ref(false)
 const showImportDialog = ref(false)
+
 const editConfig = ref<ConnectionConfig | undefined>(undefined)
-const activeView = ref<'connections' | 'quickCommands' | 'history' | 'personalization' | 'files' | 'monitor'>('connections')
+const activeView = ref<'connections' | 'openSSH' | 'quickCommands' | 'history' | 'personalization' | 'files' | 'monitor'>('connections')
 
 // ── SSH companion: files / monitor folded into this sidebar ──
 function onFilesTabClick() {
